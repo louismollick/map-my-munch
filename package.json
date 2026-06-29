@@ -18,6 +18,7 @@
     "clsx": "latest",
     "leaflet": "latest",
     "lucide-react": "latest",
+    "nitro": "3.0.260610-beta",
     "radix-ui": "^1.6.0",
     "react": "latest",
     "react-dom": "latest",
