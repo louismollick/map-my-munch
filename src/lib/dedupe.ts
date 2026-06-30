@@ -1,8 +1,6 @@
-import type { ExtractedMention, GeocodeResult } from "./domain";
+import type { GeocodeResult, MentionWithGeocode } from "./domain";
 
-export type MentionWithGeocode = ExtractedMention & {
-  geocode: GeocodeResult;
-};
+export type { MentionWithGeocode } from "./domain";
 
 export function normalizeRestaurantName(name: string) {
   return name

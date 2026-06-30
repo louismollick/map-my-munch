@@ -5,7 +5,8 @@ import { runRecommendationWorkflow } from "./server/recommendations";
 
 const requestSchema = z.object({
   place: z.string().trim().min(1),
-  category: z.string().trim().min(1)
+  category: z.string().trim().min(1),
+  refresh: z.boolean().optional()
 });
 
 export const runRecommendation = createServerFn({ method: "POST" })
@@ -15,5 +16,7 @@ export const runRecommendation = createServerFn({ method: "POST" })
       return makeMockRecommendationRun(data);
     }
 
-    return runRecommendationWorkflow(data);
+    return runRecommendationWorkflow(data, undefined, {
+      refresh: data.refresh
+    });
   });

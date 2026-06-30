@@ -3,6 +3,14 @@ export type RecommendationInput = {
   category: string;
 };
 
+export type SearchArticleResult = {
+  id: string;
+  title: string;
+  url: string;
+  author?: string;
+  publishedDate?: string;
+};
+
 export type SourceArticle = {
   id: string;
   title: string;
@@ -35,6 +43,10 @@ export type GeocodeResult = {
   warning?: string;
 };
 
+export type MentionWithGeocode = ExtractedMention & {
+  geocode: GeocodeResult;
+};
+
 export type RestaurantResult = {
   id: string;
   name: string;
@@ -63,5 +75,17 @@ export type RecommendationRunResult = {
   query: string;
   generatedAt: string;
   restaurants: RestaurantResult[];
+  warnings: string[];
+};
+
+export type RecommendationArtifacts = {
+  input: RecommendationInput;
+  query: string;
+  generatedAt: string;
+  placeGeocode: GeocodeResult;
+  searchResults: SearchArticleResult[];
+  articles: SourceArticle[];
+  extractedMentions: ExtractedMention[];
+  geocodedMentions: MentionWithGeocode[];
   warnings: string[];
 };

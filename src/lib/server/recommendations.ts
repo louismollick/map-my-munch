@@ -1,15 +1,17 @@
-import {
-  dedupeMentions,
-  type MentionWithGeocode,
-  normalizeRestaurantName
-} from "../dedupe";
+import { dedupeMentions, normalizeRestaurantName } from "../dedupe";
 import type {
   ExtractedMention,
   GeocodeResult,
+  MentionWithGeocode,
+  RecommendationArtifacts,
   RecommendationInput,
   RecommendationRunResult,
   RestaurantResult
 } from "../domain";
+import {
+  cleanRecommendationInput,
+  makeRecommendationQuery
+} from "../recommendation-query";
 import { scoreMentions, sortRestaurants } from "../scoring";
 import { createExaClient, type ExaClient } from "./exa";
 import { createGoogleGeocodeClient, type GeocodeClient } from "./google";
@@ -17,12 +19,25 @@ import {
   createOpenRouterExtractionClient,
   type ExtractionClient
 } from "./openrouter";
+import {
+  type RecommendationCache,
+  recommendationCache
+} from "./recommendation-cache";
 
 export type RecommendationClients = {
   exa: ExaClient;
   extraction: ExtractionClient;
   geocode: GeocodeClient;
 };
+
+export type RecommendationWorkflowOptions = {
+  refresh?: boolean;
+  cache?: RecommendationCache;
+  logger?: Pick<Console, "error">;
+};
+
+const CACHE_WRITE_WARNING =
+  "Cache persistence unavailable; returned live results without saving.";
 
 export function createDefaultRecommendationClients(): RecommendationClients {
   return {
@@ -32,34 +47,13 @@ export function createDefaultRecommendationClients(): RecommendationClients {
   };
 }
 
-const runCache = new Map<
-  string,
-  { expiresAt: number; result: RecommendationRunResult }
->();
-const CACHE_TTL_MS = 1000 * 60 * 20;
-
-function cleanInput(input: RecommendationInput): RecommendationInput {
-  return {
-    place: input.place.trim(),
-    category: input.category.trim()
-  };
-}
-
-function makeQuery(input: RecommendationInput) {
-  return `best ${input.category} in ${input.place}`;
-}
-
-function cacheKey(input: RecommendationInput) {
-  return `${input.place.toLowerCase()}\u0000${input.category.toLowerCase()}`;
-}
-
 function displayNameForGroup(group: MentionWithGeocode[]) {
   return group.sort((a, b) => a.name.length - b.name.length)[0].name;
 }
 
 async function extractMentions(
   clients: RecommendationClients,
-  articles: Awaited<ReturnType<ExaClient["getArticleContents"]>>,
+  articles: RecommendationArtifacts["articles"],
   input: RecommendationInput,
   warnings: string[]
 ) {
@@ -166,26 +160,16 @@ function groupToRestaurant(
   };
 }
 
-export async function runRecommendationWorkflow(
+export async function fetchRecommendationArtifacts(
   rawInput: RecommendationInput,
   clients = createDefaultRecommendationClients()
-): Promise<RecommendationRunResult> {
-  const input = cleanInput(rawInput);
-  if (!input.place || !input.category) {
-    throw new Error("Place and category are required.");
-  }
-
-  const query = makeQuery(input);
-  const key = cacheKey(input);
-  const cached = runCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.result;
-  }
-
+): Promise<RecommendationArtifacts> {
+  const input = cleanRecommendationInput(rawInput);
   const warnings: string[] = [];
   const placeGeocode = await clients.geocode.geocodePlace(input.place);
+  const query = makeRecommendationQuery(input);
 
-  let searchResults: Awaited<ReturnType<ExaClient["searchArticles"]>> = [];
+  let searchResults: RecommendationArtifacts["searchResults"] = [];
   try {
     searchResults = await clients.exa.searchArticles(query);
   } catch (error) {
@@ -194,7 +178,7 @@ export async function runRecommendationWorkflow(
     );
   }
 
-  let articles: Awaited<ReturnType<ExaClient["getArticleContents"]>> = [];
+  let articles: RecommendationArtifacts["articles"] = [];
   try {
     articles = await clients.exa.getArticleContents(
       searchResults.map((result) => result.url)
@@ -218,20 +202,87 @@ export async function runRecommendationWorkflow(
     placeGeocode,
     warnings
   );
-  const restaurants = sortRestaurants(
-    dedupeMentions(geocodedMentions).map((group) =>
-      groupToRestaurant(group, input)
-    )
-  );
 
-  const result = {
+  return {
     input,
     query,
     generatedAt: new Date().toISOString(),
-    restaurants,
+    placeGeocode,
+    searchResults,
+    articles,
+    extractedMentions,
+    geocodedMentions,
     warnings
   };
-  runCache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, result });
+}
+
+export function buildRecommendationResultFromArtifacts(
+  artifacts: RecommendationArtifacts
+): RecommendationRunResult {
+  const restaurants = sortRestaurants(
+    dedupeMentions(artifacts.geocodedMentions).map((group) =>
+      groupToRestaurant(group, artifacts.input)
+    )
+  );
+
+  return {
+    input: artifacts.input,
+    query: artifacts.query,
+    generatedAt: artifacts.generatedAt,
+    restaurants,
+    warnings: [...artifacts.warnings]
+  };
+}
+
+export function hasViableRecommendationArtifacts(
+  artifacts: RecommendationArtifacts
+) {
+  return artifacts.articles.length > 0 && artifacts.geocodedMentions.length > 0;
+}
+
+export async function runRecommendationWorkflow(
+  rawInput: RecommendationInput,
+  clients = createDefaultRecommendationClients(),
+  options: RecommendationWorkflowOptions = {}
+): Promise<RecommendationRunResult> {
+  const input = cleanRecommendationInput(rawInput);
+  if (!input.place || !input.category) {
+    throw new Error("Place and category are required.");
+  }
+
+  const cache = options.cache ?? recommendationCache;
+  const logger = options.logger ?? console;
+  let artifacts: RecommendationArtifacts | null = null;
+  let liveArtifacts: RecommendationArtifacts | null = null;
+  let shouldAppendCacheWriteWarning = false;
+
+  if (!options.refresh) {
+    try {
+      artifacts = await cache.get(input);
+    } catch (error) {
+      logger.error("Recommendation cache read failed", error);
+    }
+  }
+
+  if (!artifacts) {
+    liveArtifacts = await fetchRecommendationArtifacts(input, clients);
+    artifacts = liveArtifacts;
+
+    if (hasViableRecommendationArtifacts(liveArtifacts)) {
+      try {
+        const persisted = await cache.set(liveArtifacts);
+        shouldAppendCacheWriteWarning = persisted === false;
+      } catch (error) {
+        logger.error("Recommendation cache write failed", error);
+        shouldAppendCacheWriteWarning = true;
+      }
+    }
+  }
+
+  const result = buildRecommendationResultFromArtifacts(artifacts);
+  if (liveArtifacts && shouldAppendCacheWriteWarning) {
+    result.warnings.push(CACHE_WRITE_WARNING);
+  }
 
   return result;
 }

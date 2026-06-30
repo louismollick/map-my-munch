@@ -1,4 +1,4 @@
-import type { SourceArticle } from "../domain";
+import type { SearchArticleResult, SourceArticle } from "../domain";
 
 type ExaSearchResult = {
   id?: string;
@@ -29,7 +29,7 @@ const EXCLUDED_SOURCE_HOSTS = [
 ];
 
 export type ExaClient = {
-  searchArticles(query: string): Promise<Array<Omit<SourceArticle, "text">>>;
+  searchArticles(query: string): Promise<SearchArticleResult[]>;
   getArticleContents(urls: string[]): Promise<SourceArticle[]>;
 };
 
